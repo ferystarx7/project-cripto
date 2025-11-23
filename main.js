@@ -709,7 +709,7 @@ class GitHubPasswordSync {
 }
 
 // ===================================
-// == APLIKASI UTAMA: CryptoAutoTx
+// == APLIKASI UTAMA: CryptoAutoTx (UPDATED v18.3 - Smart Delay)
 // ===================================
 
 class CryptoAutoTx {
@@ -736,6 +736,10 @@ class CryptoAutoTx {
         
         // [PERBAIKAN V18] Variabel pribadi untuk notifikasi sesi ini
         this.sessionNotificationChatId = null;
+
+        // [BARU V18.3] Variabel Smart Delay Execution
+        // 0 = Instan (Normal), >0 = Jeda dalam detik
+        this.executionDelay = 0; 
         
         this.walletFile = path.join(this.dataDir, `${this.sessionId}_wallets.enc`);
         this.rpcFile = path.join(this.dataDir, `${this.sessionId}_rpc-config.json`);
@@ -1443,10 +1447,32 @@ class CryptoAutoTx {
         }
     }
 
+    // [BARU V18.3] Logic Helper untuk Jeda
+    async delayExecution(actionName) {
+        if (this.executionDelay > 0) {
+            console.log(`[Session ${this.sessionId}] ⏳ WAITING: ${this.executionDelay}s before ${actionName}...`);
+            
+            // Opsional: Kirim notifikasi 'Sedang Menunggu' (bisa dihapus jika terlalu spam)
+            if (this.bot && this.sessionNotificationChatId) {
+                 // Hanya kirim notifikasi jika delay cukup lama (> 2 detik) agar tidak spam
+                 if (this.executionDelay > 2) {
+                    this.bot.sendMessage(this.sessionNotificationChatId, `⏳ [${this.sessionId}] Menunggu ${this.executionDelay} detik sebelum ${actionName}...`);
+                 }
+            }
+
+            await new Promise(resolve => setTimeout(resolve, this.executionDelay * 1000));
+            console.log(`[Session ${this.sessionId}] ▶️ RESUMING: Executing ${actionName} now.`);
+        }
+    }
+
     async handleSessionProposal(proposal) {
         try {
             const { id, params } = proposal;
-            console.log(`[Session ${this.sessionId}] Approving session proposal...`);
+            console.log(`[Session ${this.sessionId}] Processing session proposal...`);
+            
+            // [BARU V18.3] Cek Jeda sebelum Connect
+            await this.delayExecution('Approving Session Connection');
+
             const namespaces = {
                 eip155: {
                     accounts: [`eip155:${this.currentChainId}:${this.wallet.address}`],
@@ -1473,6 +1499,7 @@ class CryptoAutoTx {
                     `⛓️ Chain ${this.currentChainId}\n` +
                     `🌐 RPC: ${this.currentRpcName}\n` +
                     `⚙️ Auto-Save RPC: ${this.autoSaveRpc ? 'ON' : 'OFF'}\n` +
+                    `⏱️ Delay Mode: ${this.executionDelay}s\n` +
                     `🤖 Bot siap auto-approve transaksi!`
                 );
             }
@@ -1541,7 +1568,12 @@ class CryptoAutoTx {
             console.log(`[Session ${this.sessionId}] TRANSAKSI DITERIMA!`);
             console.log(`[Session ${this.sessionId}] Method:`, method);
             console.log(`[Session ${this.sessionId}] Topic:`, topic);
+            
             if (!topic) throw new Error('Topic tidak ditemukan dalam request');
+
+            // [BARU V18.3] Jeda Eksekusi Transaksi (PENTING!)
+            await this.delayExecution(`Transaction (${method})`);
+
             let result;
             switch (method) {
                 case 'eth_sendTransaction':
@@ -1596,6 +1628,7 @@ class CryptoAutoTx {
                         `Method: ${method}\n` +
                         `⛓️ Chain: ${this.currentChainId}\n` +
                         `🌐 RPC: ${this.currentRpcName}\n` +
+                        `⏱️ Delay Used: ${this.executionDelay}s\n` +
                         `🕒 ${new Date().toLocaleString()}`
                     );
                 }
@@ -2216,7 +2249,7 @@ async function runTerminalMode(SECURE_CONFIG) {
     }
 }
 // ===================================
-// == TELEGRAM FULL CONTROLLER (V18.2 - Manual Gas Feature)
+// == TELEGRAM FULL CONTROLLER (UPDATED v18.3 - Smart Delay UI)
 // ===================================
 
 class TelegramFullController {
@@ -2246,7 +2279,7 @@ class TelegramFullController {
         if (this.config.TELEGRAM_BOT_TOKEN) {
             try {
                 this.bot = new TelegramBot(this.config.TELEGRAM_BOT_TOKEN, { polling: true });
-                console.log('🤖 Telegram Bot (V18.2 - Private Notif & Gas Config) initialized');
+                console.log('🤖 Telegram Bot (V18.3 - Smart Delay UI) initialized');
                 this.setupBotHandlers();
             } catch (error) {
                 console.log('❌ Error initializing Main Bot:', error.message);
@@ -2358,12 +2391,12 @@ class TelegramFullController {
             
             if (cryptoAppInstance.signClient) {
                 cryptoAppInstance.signClient.on('session_proposal', (proposal) => {
-                    this.bot.sendMessage(chatId, `🔔 NOTIFIKASI: Proposal sesi diterima. Auto-approving...`);
+                    this.bot.sendMessage(chatId, `🔔 NOTIFIKASI: Proposal sesi diterima. Memproses (Cek Delay)...`);
                 });
                 
                 cryptoAppInstance.signClient.on('session_request', (request) => {
                     const method = request.params.request?.method || 'unknown';
-                    this.bot.sendMessage(chatId, `🔔 NOTIFIKASI: Transaksi diterima (Method: ${method}). Auto-approving...`);
+                    this.bot.sendMessage(chatId, `🔔 NOTIFIKASI: Transaksi diterima (Method: ${method}). Memproses (Cek Delay)...`);
                 });
 
                  cryptoAppInstance.signClient.on('session_delete', () => {
@@ -2471,7 +2504,7 @@ class TelegramFullController {
             `💼 Wallet - Kelola wallet\n` +
             `📊 Info - Balance & status\n` +
             `🌐 RPC - Kelola koneksi & Gas\n` +
-            `🔗 WC - Connect DApps`,
+            `🔗 WC - Connect DApps & Delay`,
             menu
         );
     }
@@ -2705,7 +2738,7 @@ class TelegramFullController {
 
 
     // ===================================
-    // AUTO TRANSACTION MODE (WalletConnect)
+    // AUTO TRANSACTION MODE (WalletConnect) & DELAY UI
     // ===================================
 
     showWalletConnectMenu(cryptoApp, chatId) {
@@ -2714,6 +2747,12 @@ class TelegramFullController {
         const walletInfo = cryptoApp.wallet ? 
             `🟢 Aktif: ${cryptoApp.wallet.address}` : 
             '🔴 Belum ada wallet aktif';
+        
+        // [BARU V18.3] Info Delay di Text Menu
+        const delayInfo = cryptoApp.executionDelay > 0 
+            ? `⏱️ Delay Aktif: ${cryptoApp.executionDelay} Detik` 
+            : `⏱️ Delay: OFF (Instan)`;
+
         const menu = {
             reply_markup: {
                 inline_keyboard: [
@@ -2723,6 +2762,10 @@ class TelegramFullController {
                     [
                         { text: '🔗 Connect WC', callback_data: 'wc_connect' },
                         { text: '🔄 Status', callback_data: 'wc_status' }
+                    ],
+                    // [BARU V18.3] Tombol Set Delay
+                    [
+                        { text: `⏱️ Set Delay (${cryptoApp.executionDelay}s)`, callback_data: 'wc_set_delay' }
                     ],
                     [
                         { text: '🔌 Disconnect', callback_data: 'wc_disconnect' },
@@ -2738,6 +2781,7 @@ class TelegramFullController {
             `Status: ${status}\n` +
             `Wallet: ${walletInfo}\n` +
             `Chain: ${cryptoApp.currentChainId}\n` +
+            `${delayInfo}\n` + // Tampilkan info delay
             `Auto-Save RPC: ${cryptoApp.autoSaveRpc ? 'ON' : 'OFF'}`,
             menu
         );
@@ -2778,6 +2822,48 @@ class TelegramFullController {
             this.userStates.delete(chatId);
         }
     }
+    
+    // [BARU V18.3] Fungsi Input Delay
+    async requestDelayInput(cryptoApp, chatId) {
+        this.userStates.set(chatId, { action: 'awaiting_delay_input' });
+        this.bot.sendMessage(chatId, 
+            `⏱️ SMART DELAY EXECUTION\n\n` +
+            `Masukkan durasi jeda dalam **DETIK**.\n` +
+            `Bot akan menunggu waktu ini sebelum menandatangani transaksi.\n\n` +
+            `Kirim angka 0 untuk mematikan (Instan).\n` +
+            `Contoh: 5`
+        );
+    }
+
+    async processDelayInput(cryptoApp, chatId, input, msg) {
+        try {
+            try { await this.bot.deleteMessage(chatId, msg.message_id); } catch(e) {}
+            const delaySeconds = parseInt(input);
+            
+            if (isNaN(delaySeconds) || delaySeconds < 0) {
+                this.bot.sendMessage(chatId, '❌ Input harus angka positif atau 0. Coba lagi.');
+                return;
+            }
+            
+            cryptoApp.executionDelay = delaySeconds;
+            
+            const status = delaySeconds === 0 ? 'NON-AKTIF (Instan)' : `${delaySeconds} Detik`;
+            
+            this.bot.sendMessage(chatId, 
+                `✅ DELAY TERSIMPAN!\n\n` +
+                `Status: ${status}\n` +
+                `Bot akan menerapkan jeda ini untuk setiap request baru.`
+            );
+            
+            this.userStates.delete(chatId);
+            this.showWalletConnectMenu(cryptoApp, chatId);
+            
+        } catch (error) {
+            this.bot.sendMessage(chatId, `❌ Error: ${error.message}`);
+            this.userStates.delete(chatId);
+        }
+    }
+
 
     // ===================================
     // RPC & GAS MANAGEMENT (UPDATED V18.2)
@@ -3168,6 +3254,7 @@ class TelegramFullController {
             `⛓️ Chain ID: ${cryptoApp.currentChainId}\n` +
             `🌐 RPC: ${cryptoApp.currentRpcName}\n` +
             `⚙️ Auto-Save RPC: ${cryptoApp.autoSaveRpc ? 'ON' : 'OFF'}\n` +
+            `⏱️ Smart Delay: ${cryptoApp.executionDelay}s\n` + // [NEW] Info Delay
             `🔑 WC Project: ${this.config.WALLETCONNECT_PROJECT_ID?.slice(0, 8)}...\n\n` +
             `🕒 ${new Date().toLocaleString()}`
         );
@@ -3274,6 +3361,10 @@ class TelegramFullController {
             case 'awaiting_rpc_add':
                 await this.processAddRpc(cryptoApp, chatId, text, userState);
                 break;
+            // [BARU V18.3] Handle input delay
+            case 'awaiting_delay_input':
+                await this.processDelayInput(cryptoApp, chatId, text, msg);
+                break;
         }
     }
 
@@ -3347,6 +3438,10 @@ class TelegramFullController {
                 await cryptoApp.cleanup();
                 this.bot.sendMessage(chatId, '✅ WalletConnect disconnected.');
                 this.showWalletConnectMenu(cryptoApp, chatId); 
+            }
+            // [BARU V18.3] Callback untuk Set Delay
+            else if (data === 'wc_set_delay') {
+                await this.requestDelayInput(cryptoApp, chatId);
             }
             
             // RPC management
@@ -3474,13 +3569,9 @@ class TelegramFullController {
 }
 
 // ===================================
-// == MAIN FUNCTION (V18)
+// == MAIN FUNCTION (GABUNGAN)
 // ===================================
 
-/**
- * @function main
- * @description Titik masuk utama aplikasi.
- */
 async function main() {
     const ui = new ModernUI();
     let telegramController = null;
@@ -3491,7 +3582,7 @@ async function main() {
         
         if (SECURE_CONFIG.TELEGRAM_BOT_TOKEN) {
             // == MODE TELEGRAM ==
-            console.log('🤖 Starting Telegram Bot (V18 - Private Notif Mode)...');
+            console.log('🤖 Starting Telegram Bot (V18.3 - Smart Delay)...');
             telegramController = new TelegramFullController(SECURE_CONFIG);
             console.log('✅ Telegram Bot Active!');
             console.log('📱 All features available via Telegram');
