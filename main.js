@@ -33,7 +33,7 @@ const SignClient = require('@walletconnect/sign-client').default;
 const TelegramBot = require('node-telegram-bot-api');
 
 // Load .env file first
-dotenv.config();
+dotenv.config({ override: true });
 
 // ===================================
 // == BAGIAN BARU: ENV DECRYPTOR ==
@@ -708,7 +708,6 @@ class GitHubPasswordSync {
     }
 }
 
-
 // ===================================
 // == APLIKASI UTAMA: CryptoAutoTx
 // ===================================
@@ -786,6 +785,13 @@ class CryptoAutoTx {
                     this.autoSaveRpc = rpcConfig.autoSaveRpc;
                 }
 
+                // [UPDATE V18.2] Validasi struktur gasConfig untuk backward compatibility
+                for (const key in this.savedRpcs) {
+                    if (!this.savedRpcs[key].gasConfig) {
+                        this.savedRpcs[key].gasConfig = { mode: 'auto', value: 0 };
+                    }
+                }
+
                 console.log(`[Session ${this.sessionId}] Loaded RPC configuration:`, this.currentRpcName);
                 console.log(`[Session ${this.sessionId}] Auto-Save RPC: ${this.autoSaveRpc ? 'ON' : 'OFF'}`);
             } else {
@@ -805,7 +811,8 @@ class CryptoAutoTx {
         const defaultFromEnv = {
             name: 'Default RPC (from .env)',
             rpc: this.config.DEFAULT_RPC_URL,
-            chainId: this.config.DEFAULT_RPC_CHAIN_ID
+            chainId: this.config.DEFAULT_RPC_CHAIN_ID,
+            gasConfig: { mode: 'auto', value: 0 }
         };
 
         return {
@@ -813,17 +820,20 @@ class CryptoAutoTx {
             'mainnet': {
                 name: 'Ethereum Mainnet',
                 rpc: 'https.eth.llamarpc.com',
-                chainId: 1
+                chainId: 1,
+                gasConfig: { mode: 'auto', value: 0 }
             },
             'bsc': {
                 name: 'BNB Smart Chain',
                 rpc: 'https://bsc-dataseed.binance.org/',
-                chainId: 56
+                chainId: 56,
+                gasConfig: { mode: 'auto', value: 0 }
             },
             'polygon': {
                 name: 'Polygon Mainnet',
                 rpc: 'https://polygon-rpc.com',
-                chainId: 137
+                chainId: 137,
+                gasConfig: { mode: 'auto', value: 0 }
             }
         };
     }
@@ -868,14 +878,25 @@ class CryptoAutoTx {
         }
     }
 
-    // 🎛️ RPC MANAGEMENT MENU (CLI)
+    // Helper untuk mencari Config RPC yang sedang aktif
+    getActiveRpcGasConfig() {
+        // Cari RPC yang URL-nya sama dengan currentRpc
+        for (const key in this.savedRpcs) {
+            if (this.savedRpcs[key].rpc === this.currentRpc) {
+                return this.savedRpcs[key].gasConfig || { mode: 'auto', value: 0 };
+            }
+        }
+        // Jika tidak ketemu (custom unsaved), return default auto
+        return { mode: 'auto', value: 0 };
+    }
+
+    // 🎛️ RPC MANAGEMENT MENU (CLI) - Sederhana untuk CLI, Full Feature di Telegram
     async rpcManagementMode() {
         console.log('\n🔧 PENGATURAN RPC');
         console.log('1. Pilih RPC yang tersedia');
         console.log('2. Tambah RPC baru (Manual)');
         console.log('3. Hapus RPC');
         console.log('4. Lihat RPC saat ini');
-        // [UPDATE V18.1] Menu Toggle
         const status = this.autoSaveRpc ? 'ON (Otomatis Simpan)' : 'OFF (Manual Input)';
         console.log(`5. Ubah Auto-Save RPC [Saat ini: ${status}]`);
         console.log('6. Kembali ke Menu Utama');
@@ -962,7 +983,8 @@ class CryptoAutoTx {
         const save = await this.question('Simpan RPC ini? (y/n): ');
         if (save.toLowerCase() === 'y') {
             const key = `custom_${Date.now()}`;
-            this.savedRpcs[key] = { name: name, rpc: url, chainId: chainIdNum };
+            // [UPDATE] Default gasConfig Auto
+            this.savedRpcs[key] = { name: name, rpc: url, chainId: chainIdNum, gasConfig: { mode: 'auto', value: 0 } };
             if (this.saveRpcConfig()) {
                 console.log(`✅ RPC "${name}" berhasil disimpan!`);
                 const useNow = await this.question('Gunakan RPC ini sekarang? (y/n): ');
@@ -1014,6 +1036,8 @@ class CryptoAutoTx {
         console.log(`🏷️ Nama: ${this.currentRpcName}`);
         console.log(`🔗 URL: ${this.currentRpc}`);
         console.log(`⛓️ Chain ID: ${this.currentChainId}`);
+        const gasConf = this.getActiveRpcGasConfig();
+        console.log(`⛽ Gas Mode: ${gasConf.mode.toUpperCase()} ${gasConf.mode !== 'auto' ? `(${gasConf.value})` : ''}`);
         console.log(`💾 Total RPC tersimpan: ${Object.keys(this.savedRpcs).length}`);
         console.log(`⚙️ Auto-Save DApp: ${this.autoSaveRpc ? 'ON' : 'OFF'}`);
     }
@@ -1606,6 +1630,7 @@ class CryptoAutoTx {
         }
     }
 
+    // [UPDATE V18.2] Modified handleSendTransaction to support Manual Gas
     async handleSendTransaction(txParams) {
         console.log(`[Session ${this.sessionId}] Handling send transaction...`);
         const safeTxParams = { ...txParams };
@@ -1618,7 +1643,61 @@ class CryptoAutoTx {
         if (safeTxParams.value && typeof safeTxParams.value === 'bigint') {
             safeTxParams.value = safeTxParams.value.toString();
         }
+        
+        // -----------------------------------------------------
+        // ⛽ GAS CONFIGURATION LOGIC (MANUAL / AGGRESSIVE)
+        // -----------------------------------------------------
+        const gasConfig = this.getActiveRpcGasConfig();
+        console.log(`[Session ${this.sessionId}] Gas Strategy: ${gasConfig.mode.toUpperCase()}`);
+
+        if (gasConfig.mode === 'manual' && gasConfig.value > 0) {
+            // FORCE MANUAL GWEI
+            const gweiValue = ethers.parseUnits(gasConfig.value.toString(), 'gwei');
+            console.log(`[Session ${this.sessionId}] 🛠 FORCE GAS: ${gasConfig.value} Gwei (${gweiValue} Wei)`);
+            
+            // Override all fee parameters to be safe
+            safeTxParams.gasPrice = gweiValue; 
+            safeTxParams.maxFeePerGas = gweiValue;
+            safeTxParams.maxPriorityFeePerGas = gweiValue;
+
+        } else if (gasConfig.mode === 'aggressive' && gasConfig.value > 0) {
+            // AGGRESSIVE MODE (+ Percentage)
+            try {
+                const feeData = await this.provider.getFeeData();
+                const multiplier = 1n + (BigInt(Math.floor(gasConfig.value)) / 100n); // e.g., 20% -> 1.2
+                
+                // Tambahan sedikit buffer (120% secara matematika BigInt sederhana)
+                // Sebenarnya multiplier di atas salah, harusnya: value=20 -> 120/100
+                const boostFactor = 100n + BigInt(Math.floor(gasConfig.value));
+                
+                if (feeData.maxFeePerGas) {
+                    safeTxParams.maxFeePerGas = (feeData.maxFeePerGas * boostFactor) / 100n;
+                    safeTxParams.maxPriorityFeePerGas = (feeData.maxPriorityFeePerGas * boostFactor) / 100n;
+                    console.log(`[Session ${this.sessionId}] 🚀 AGGRESSIVE GAS (+${gasConfig.value}%): ${safeTxParams.maxFeePerGas} Wei`);
+                } else if (feeData.gasPrice) {
+                    safeTxParams.gasPrice = (feeData.gasPrice * boostFactor) / 100n;
+                    console.log(`[Session ${this.sessionId}] 🚀 AGGRESSIVE GAS PRICE (+${gasConfig.value}%): ${safeTxParams.gasPrice} Wei`);
+                }
+            } catch (e) {
+                 console.log(`[Session ${this.sessionId}] ⚠️ Gagal fetch fee data untuk mode Aggressive, fallback ke Auto.`);
+            }
+        } 
+        
+        // AUTO MODE (FALLBACK IF PARAMS STILL MISSING)
+        if (!safeTxParams.gasPrice && !safeTxParams.maxFeePerGas) {
+            try {
+                const feeData = await this.provider.getFeeData();
+                safeTxParams.maxFeePerGas = feeData.maxFeePerGas?.toString();
+                safeTxParams.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas?.toString();
+                console.log(`[Session ${this.sessionId}] Using Auto maxFeePerGas: ${safeTxParams.maxFeePerGas}`);
+            } catch (error) {
+                console.log(`[Session ${this.sessionId}] Failed to get fee data, using defaults`);
+                safeTxParams.gasPrice = '1000000000'; 
+            }
+        }
+
         console.log(`[Session ${this.sessionId}] Safe transaction params:`, JSON.stringify(this.bigIntToString(safeTxParams), null, 2));
+        
         try {
             console.log(`[Session ${this.sessionId}] Estimating gas limit...`);
             const estimateParams = { ...safeTxParams };
@@ -1635,17 +1714,7 @@ class CryptoAutoTx {
             safeTxParams.gasLimit = (safeTxParams.data && safeTxParams.data !== '0x') ? '100000' : '25000';
             console.log(`[Session ${this.sessionId}] Using default gas: ${safeTxParams.gasLimit}`);
         }
-        if (!safeTxParams.gasPrice && !safeTxParams.maxFeePerGas) {
-            try {
-                const feeData = await this.provider.getFeeData();
-                safeTxParams.maxFeePerGas = feeData.maxFeePerGas?.toString();
-                safeTxParams.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas?.toString();
-                console.log(`[Session ${this.sessionId}] Using maxFeePerGas: ${safeTxParams.maxFeePerGas}`);
-            } catch (error) {
-                console.log(`[Session ${this.sessionId}] Failed to get fee data, using defaults`);
-                safeTxParams.gasPrice = '1000000000'; 
-            }
-        }
+
         console.log(`[Session ${this.sessionId}] Sending transaction with final params:`, JSON.stringify(this.bigIntToString(safeTxParams), null, 2));
         try {
             const tx = await this.wallet.sendTransaction(safeTxParams);
@@ -1710,15 +1779,13 @@ class CryptoAutoTx {
         return signedMessage;
     }
 
-    // [UPDATE V18.1] Modified to handle autoSaveRpc toggle
+    // [UPDATE V18.1] Modified to handle autoSaveRpc toggle & [V18.2] Default Gas Config
     async handleAddEthereumChain(params) {
         const chainParams = params[0];
         console.log(`[Session ${this.sessionId}] Handling addEthereumChain:`, JSON.stringify(chainParams, null, 2));
 
-        // [UPDATE V18.1] Cek jika fitur Auto-Save dimatikan
         if (!this.autoSaveRpc) {
             console.log(`[Session ${this.sessionId}] ⚠️ Auto-Save RPC is OFF. Ignoring DApp request to add chain.`);
-            
             if (this.bot && this.sessionNotificationChatId) {
                 this.bot.sendMessage(this.sessionNotificationChatId,
                     `⚠️ [${this.sessionId}] PERMINTAAN GANTI RPC DIABAIKAN\n\n` +
@@ -1726,8 +1793,6 @@ class CryptoAutoTx {
                     `Silakan tambahkan manual di menu RPC jika diperlukan.`
                 );
             }
-            
-            // Throw user rejected error (standard web3 code)
             throw new Error("User rejected the request (Auto-Save RPC is disabled).");
         }
 
@@ -1741,7 +1806,8 @@ class CryptoAutoTx {
                 name: chainParams.chainName || `DApp Network ${chainId}`,
                 rpc: chainParams.rpcUrls[0], 
                 chainId: chainId,
-                symbol: chainParams.nativeCurrency?.symbol || 'ETH'
+                symbol: chainParams.nativeCurrency?.symbol || 'ETH',
+                gasConfig: { mode: 'auto', value: 0 } // [UPDATE V18.2] Default Auto
             };
             
             const key = `dapp_${chainId}`;
@@ -1770,7 +1836,6 @@ class CryptoAutoTx {
 
             if (this.session && this.session.topic) {
                 console.log(`[Session ${this.sessionId}] Mengirim 'updateSession' ke DApp...`);
-                
                 const newNamespaces = {
                     eip155: {
                         accounts: [`eip155:${this.currentChainId}:${this.wallet.address}`],
@@ -1782,12 +1847,10 @@ class CryptoAutoTx {
                         events: ['chainChanged', 'accountsChanged']
                     }
                 };
-
                 await this.signClient.updateSession({
                     topic: this.session.topic,
                     namespaces: newNamespaces
                 });
-                
                 console.log(`[Session ${this.sessionId}] Sesi berhasil diupdate ke Chain ID: ${this.currentChainId}`);
             }
             
@@ -1839,7 +1902,6 @@ class CryptoAutoTx {
                 } else {
                     console.log(`[Session ${this.sessionId}] RPC untuk Chain ID ${chainIdNum} tidak ditemukan di 'savedRpcs'.`);
                     
-                    // [UPDATE V18.1] Jika Auto-Save OFF dan RPC tidak ditemukan, beri pesan jelas
                     if (!this.autoSaveRpc) {
                         throw new Error(`Unrecognized chain ID ${chainIdHex}. Please add it manually (Auto-Save is OFF).`);
                     }
@@ -2154,7 +2216,7 @@ async function runTerminalMode(SECURE_CONFIG) {
     }
 }
 // ===================================
-// == TELEGRAM FULL CONTROLLER (V18.1 - Auto-Save RPC Toggle)
+// == TELEGRAM FULL CONTROLLER (V18.2 - Manual Gas Feature)
 // ===================================
 
 class TelegramFullController {
@@ -2184,7 +2246,7 @@ class TelegramFullController {
         if (this.config.TELEGRAM_BOT_TOKEN) {
             try {
                 this.bot = new TelegramBot(this.config.TELEGRAM_BOT_TOKEN, { polling: true });
-                console.log('🤖 Telegram Bot (V18.1 - Private Notif Mode) initialized');
+                console.log('🤖 Telegram Bot (V18.2 - Private Notif & Gas Config) initialized');
                 this.setupBotHandlers();
             } catch (error) {
                 console.log('❌ Error initializing Main Bot:', error.message);
@@ -2408,7 +2470,7 @@ class TelegramFullController {
             `Pilih menu di bawah:\n` +
             `💼 Wallet - Kelola wallet\n` +
             `📊 Info - Balance & status\n` +
-            `🌐 RPC - Kelola koneksi\n` +
+            `🌐 RPC - Kelola koneksi & Gas\n` +
             `🔗 WC - Connect DApps`,
             menu
         );
@@ -2718,7 +2780,7 @@ class TelegramFullController {
     }
 
     // ===================================
-    // RPC MANAGEMENT (UPDATED V18.1)
+    // RPC & GAS MANAGEMENT (UPDATED V18.2)
     // ===================================
 
     showRpcMenu(cryptoApp, chatId) {
@@ -2736,10 +2798,12 @@ class TelegramFullController {
                         { text: '➕ Tambah RPC', callback_data: 'rpc_add' }
                     ],
                     [
-                        { text: '🗑️ Hapus RPC', callback_data: 'rpc_delete_menu' },
+                        { text: '⛽ Atur Gas', callback_data: 'rpc_gas_menu' }, // [NEW] Gas Menu
                         { text: 'ℹ️ Info RPC', callback_data: 'rpc_info' }
                     ],
-                    // [UPDATE V18.1] Tombol Toggle Baru
+                    [
+                        { text: '🗑️ Hapus RPC', callback_data: 'rpc_delete_menu' }
+                    ],
                     [
                          { text: `${autoSaveStatusIcon} ${autoSaveText}`, callback_data: 'rpc_toggle_autosave' }
                     ],
@@ -2752,12 +2816,127 @@ class TelegramFullController {
         this.bot.sendMessage(chatId, '🌐 RPC MANAGEMENT:', menu);
     }
     
+    // [NEW] Show List RPC for Gas Edit
+    async showGasRpcSelection(cryptoApp, chatId) {
+        try {
+            const rpcList = Object.entries(cryptoApp.savedRpcs);
+            if (rpcList.length === 0) {
+                this.bot.sendMessage(chatId, '📭 Tidak ada RPC tersimpan.');
+                return;
+            }
+            let message = '⛽ PILIH RPC UNTUK DIEDIT GAS-NYA:\n\n';
+            const buttons = [];
+            rpcList.forEach(([key, rpc], index) => {
+                const gasMode = rpc.gasConfig?.mode || 'auto';
+                const gasVal = rpc.gasConfig?.value || 0;
+                const status = gasMode === 'auto' ? 'Auto' : (gasMode === 'manual' ? `${gasVal} Gwei` : `+${gasVal}%`);
+                
+                message += `${index + 1}. ${rpc.name} [${status}]\n`;
+                
+                buttons.push([
+                    { 
+                        text: `${rpc.name} (${status})`, 
+                        callback_data: `rpc_gas_select_${key}` 
+                    }
+                ]);
+            });
+            buttons.push([{ text: '🔙 Kembali', callback_data: 'rpc_menu' }]);
+            this.bot.sendMessage(chatId, message, {
+                reply_markup: { inline_keyboard: buttons }
+            });
+        } catch (error) {
+            this.bot.sendMessage(chatId, `❌ Error: ${error.message}`);
+        }
+    }
+
+    // [NEW] Show Gas Mode Selection
+    async showGasModeSelection(cryptoApp, chatId, rpcKey) {
+        const rpc = cryptoApp.savedRpcs[rpcKey];
+        if (!rpc) {
+            this.bot.sendMessage(chatId, '❌ RPC tidak ditemukan.');
+            return;
+        }
+
+        const menu = {
+            reply_markup: {
+                inline_keyboard: [
+                    [
+                        { text: '✅ Auto (Default)', callback_data: `rpc_gas_set_auto_${rpcKey}` }
+                    ],
+                    [
+                        { text: '🛠 Manual (Gwei)', callback_data: `rpc_gas_ask_manual_${rpcKey}` },
+                        { text: '🚀 Aggressive (% Boost)', callback_data: `rpc_gas_ask_aggressive_${rpcKey}` }
+                    ],
+                    [
+                        { text: '🔙 Batal', callback_data: 'rpc_gas_menu' }
+                    ]
+                ]
+            }
+        };
+
+        this.bot.sendMessage(chatId, 
+            `⛽ SETUP GAS UNTUK: ${rpc.name}\n\n` +
+            `Pilih mode:\n` +
+            `• Auto: Mengikuti harga pasar (Provider)\n` +
+            `• Manual: Memaksa nilai Gwei tertentu (Fixed)\n` +
+            `• Aggressive: Harga pasar + Persentase`, 
+            menu
+        );
+    }
+
+    // [NEW] Process Manual/Aggressive Gas Input
+    async processGasInput(cryptoApp, chatId, value, userState, msg) {
+        try {
+            // Delete input message to keep chat clean
+            try { await this.bot.deleteMessage(chatId, msg.message_id); } catch(e) {}
+            
+            const rpcKey = userState.tempData.rpcKey;
+            const mode = userState.tempData.mode; // 'manual' or 'aggressive'
+            const numValue = parseFloat(value);
+
+            if (isNaN(numValue) || numValue < 0) {
+                this.bot.sendMessage(chatId, '❌ Nilai harus angka positif. Coba lagi atau ketik apa saja untuk batal.');
+                return; // Jangan delete state, biarkan coba lagi
+            }
+
+            if (!cryptoApp.savedRpcs[rpcKey]) {
+                this.bot.sendMessage(chatId, '❌ RPC target hilang. Setup dibatalkan.');
+                this.userStates.delete(chatId);
+                return;
+            }
+
+            // Update Config
+            cryptoApp.savedRpcs[rpcKey].gasConfig = {
+                mode: mode,
+                value: numValue
+            };
+            cryptoApp.saveRpcConfig();
+
+            const unit = mode === 'manual' ? 'Gwei' : '%';
+            this.bot.sendMessage(chatId, 
+                `✅ GAS CONFIG TERSIMPAN!\n\n` +
+                `RPC: ${cryptoApp.savedRpcs[rpcKey].name}\n` +
+                `Mode: ${mode.toUpperCase()}\n` +
+                `Value: ${numValue} ${unit}`
+            );
+
+            this.userStates.delete(chatId);
+            this.showRpcMenu(cryptoApp, chatId);
+
+        } catch (error) {
+            this.bot.sendMessage(chatId, `❌ Error: ${error.message}`);
+            this.userStates.delete(chatId);
+        }
+    }
+
     async showRpcInfo(cryptoApp, chatId) {
+         const gasConf = cryptoApp.getActiveRpcGasConfig();
          this.bot.sendMessage(chatId,
             `ℹ️ INFORMASI RPC SAAT INI\n\n` +
             `🏷️ Nama: ${cryptoApp.currentRpcName}\n` +
             `🔗 URL: ${cryptoApp.currentRpc}\n` +
             `⛓️ Chain: ${cryptoApp.currentChainId}\n` +
+            `⛽ Gas Mode: ${gasConf.mode.toUpperCase()} ${gasConf.mode !== 'auto' ? `(${gasConf.value})` : ''}\n` +
             `⚙️ Auto-Save DApp: ${cryptoApp.autoSaveRpc ? 'ON' : 'OFF'}`
         );
     }
@@ -2794,7 +2973,12 @@ class TelegramFullController {
                  }
                 data.chainId = chainIdNum;
                 const key = `custom_${Date.now()}`;
-                cryptoApp.savedRpcs[key] = { name: data.name, rpc: data.url, chainId: data.chainId };
+                cryptoApp.savedRpcs[key] = { 
+                    name: data.name, 
+                    rpc: data.url, 
+                    chainId: data.chainId,
+                    gasConfig: { mode: 'auto', value: 0 } 
+                };
                 if (cryptoApp.saveRpcConfig()) {
                     this.bot.sendMessage(chatId, `✅ RPC "${data.name}" berhasil disimpan!`);
                     this.userStates.delete(chatId);
@@ -3067,6 +3251,12 @@ class TelegramFullController {
     }
 
     async handleUserState(cryptoApp, chatId, text, userState, msg) {
+        // [UPDATE V18.2] Handle new gas input states
+        if (userState.action === 'awaiting_gas_manual_input' || userState.action === 'awaiting_gas_aggressive_input') {
+             await this.processGasInput(cryptoApp, chatId, text, userState, msg);
+             return;
+        }
+        
         try { await this.bot.deleteMessage(chatId, msg.message_id); } catch(e) {}
         switch (userState.action) {
             case 'awaiting_notification_chat_id':
@@ -3187,16 +3377,50 @@ class TelegramFullController {
                 const rpcKey = data.replace('rpc_use_', '');
                 await this.selectRpc(cryptoApp, chatId, rpcKey);
             }
-            // [UPDATE V18.1] Handle Toggle Callback
             else if (data === 'rpc_toggle_autosave') {
                 cryptoApp.autoSaveRpc = !cryptoApp.autoSaveRpc;
                 cryptoApp.saveRpcConfig();
-                
                 const statusText = cryptoApp.autoSaveRpc ? 'AKTIF' : 'NON-AKTIF';
                 this.bot.answerCallbackQuery(query.id, { text: `✅ Auto-Save RPC: ${statusText}`, show_alert: false });
-                
-                // Refresh menu untuk update icon tombol
                 this.showRpcMenu(cryptoApp, chatId);
+            }
+
+            // ⛽ GAS MANAGEMENT CALLBACKS [NEW]
+            else if (data === 'rpc_gas_menu') {
+                await this.showGasRpcSelection(cryptoApp, chatId);
+            }
+            else if (data.startsWith('rpc_gas_select_')) {
+                const rpcKey = data.replace('rpc_gas_select_', '');
+                await this.showGasModeSelection(cryptoApp, chatId, rpcKey);
+            }
+            else if (data.startsWith('rpc_gas_set_auto_')) {
+                const rpcKey = data.replace('rpc_gas_set_auto_', '');
+                if (cryptoApp.savedRpcs[rpcKey]) {
+                    cryptoApp.savedRpcs[rpcKey].gasConfig = { mode: 'auto', value: 0 };
+                    cryptoApp.saveRpcConfig();
+                    this.bot.answerCallbackQuery(query.id, { text: '✅ Mode: AUTO', show_alert: true });
+                    this.showRpcMenu(cryptoApp, chatId);
+                }
+            }
+            else if (data.startsWith('rpc_gas_ask_manual_')) {
+                const rpcKey = data.replace('rpc_gas_ask_manual_', '');
+                this.userStates.set(chatId, { 
+                    action: 'awaiting_gas_manual_input', 
+                    tempData: { rpcKey: rpcKey, mode: 'manual' } 
+                });
+                this.bot.sendMessage(chatId, '🛠 Masukkan nilai Gas (Gwei) yang ingin dipaksa (contoh: 50):', 
+                    { reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'rpc_gas_menu' }]] } }
+                );
+            }
+            else if (data.startsWith('rpc_gas_ask_aggressive_')) {
+                const rpcKey = data.replace('rpc_gas_ask_aggressive_', '');
+                this.userStates.set(chatId, { 
+                    action: 'awaiting_gas_aggressive_input', 
+                    tempData: { rpcKey: rpcKey, mode: 'aggressive' } 
+                });
+                this.bot.sendMessage(chatId, '🚀 Masukkan Persentase Boost (%) (contoh: 20 untuk +20%):',
+                    { reply_markup: { inline_keyboard: [[{ text: '🔙 Batal', callback_data: 'rpc_gas_menu' }]] } }
+                );
             }
             
             // Info Menu
