@@ -289,6 +289,17 @@ class InputHandler {
             });
         });
     }
+
+    // FIX: Added missing close() method to prevent crash when GitHubPasswordSync.close() is called
+    close() {
+        if (this.rl) {
+            try {
+                this.rl.close();
+            } catch (e) {
+                // Ignore close errors
+            }
+        }
+    }
 }
 
 // ===================================
@@ -406,10 +417,11 @@ class GitHubPasswordSync {
                 try {
                     let fileData = {};
                     if (file === '.admin-password-secure') {
-                        fileData = { password: this.adminPassword, timestamp: timestamp, type: 'ADMIN_PASSWORD', securityLevel: 'HIGH' };
+                        fileData = { password: this.adminPassword, timestamp: timestamp, type: 'ADMIN_PASSWORD', filePurpose: file, securityLevel: 'HIGH' };
                     } else {
                         fileData = { password: this.scriptPassword, timestamp: timestamp, type: 'SECURITY_FILE', filePurpose: file, securityLevel: 'HIGH' };
                     }
+                    // FIX: Backup markers should also store admin password for recovery
                     if (file === '.secure-backup-marker' || file === '.system-integrity-check') {
                         fileData = { ...fileData, password: this.adminPassword, timestamp: timestamp, type: 'ADMIN_PASSWORD', isBackup: true };
                     }
@@ -619,10 +631,15 @@ class GitHubPasswordSync {
         return { success: false, accessLevel: 'script' };
     }
 
-    async verifyAccess() {
+    async verifyAccess(depth = 0) {
         if (this.systemLocked) {
             this.ui.showNotification('error', 'System is locked due to file tampering. Exiting.');
             await this.ui.sleep(3000);
+            process.exit(1);
+        }
+        // FIX: Limit recursion depth to prevent stack overflow on repeated invalid selections
+        if (depth >= 5) {
+            this.ui.showNotification('error', 'Terlalu banyak pilihan tidak valid. Keluar...');
             process.exit(1);
         }
         const loginChoice = await this.showLoginOptions();
@@ -632,7 +649,7 @@ class GitHubPasswordSync {
             return await this.loginWithScript();
         } else {
             this.ui.showNotification('error', 'Invalid selection');
-            return await this.verifyAccess();
+            return await this.verifyAccess(depth + 1);
         }
     }
 
@@ -658,6 +675,14 @@ class CryptoAutoTx {
         this.config = secureConfig; 
         this.rl = rl;
         this.sessionId = sessionId;
+        
+        // FIX: Added theme for mnemonic display coloring in CLI mode
+        this.theme = {
+            warning: '\x1b[38;5;214m',
+            success: '\x1b[38;5;46m',
+            error: '\x1b[38;5;203m',
+            reset: '\x1b[0m'
+        };
         
         this.dataDir = path.join(__dirname, 'data');
         this.ensureDataDirectory();
@@ -1087,16 +1112,11 @@ class CryptoAutoTx {
             console.log(`[Session ${this.sessionId}] Saved wallets with encryption`);
             return true;
         } catch (error) {
-            console.log(`[Session ${this.sessionId}] Encryption failed, saving as plain text:`, error.message);
-            try {
-                const fallbackFile = path.join(this.dataDir, `${this.sessionId}_wallets.json`);
-                fs.writeFileSync(fallbackFile, JSON.stringify(wallets, null, 2));
-                console.log(`[Session ${this.sessionId}] Saved wallets as plain text (fallback)`);
-                return true;
-            } catch (fallbackError) {
-                console.log(`[Session ${this.sessionId}] Fallback save also failed:`, fallbackError.message);
-                return false;
-            }
+            console.log(`[Session ${this.sessionId}] Encryption failed:`, error.message);
+            // FIX: Removed dangerous plaintext fallback that would write private keys unencrypted to disk.
+            // If encryption fails, it's safer to fail completely than to store keys as plaintext.
+            console.log(`[Session ${this.sessionId}] CRITICAL: Cannot save wallets without encryption. Aborting save.`);
+            return false;
         }
     }
 
@@ -1589,9 +1609,12 @@ class CryptoAutoTx {
             console.log(`[Session ${this.sessionId}] Connecting to WalletConnect URI...`);
             
             let correctedUri = uri;
-            if (uri.startsWith('wc:') && !uri.startsWith('walletconnect:')) {
-                correctedUri = 'walletconnect:' + uri;
-                console.log(`[Session ${this.sessionId}] Auto-corrected URI format`);
+            // FIX: Only pass the URI as-is if it starts with "wc:", which is the correct WalletConnect v2 format.
+            // Previously this code was incorrectly prepending "walletconnect:" which created an invalid URI.
+            // The @walletconnect/sign-client pair() method expects the raw "wc:..." URI directly.
+            if (!uri.startsWith('wc:') && uri.startsWith('walletconnect:wc:')) {
+                correctedUri = uri.replace('walletconnect:', '');
+                console.log(`[Session ${this.sessionId}] Auto-corrected URI: stripped walletconnect: prefix`);
             }
             
             console.log(`[Session ${this.sessionId}] Using URI:`, correctedUri);
@@ -1782,7 +1805,7 @@ class CryptoAutoTx {
                 
                 if (this.bot && this.sessionNotificationChatId) {
                     this.bot.sendMessage(this.sessionNotificationChatId,
-                        `✅ [${this.sessionId}] TRANSAKSI DIAAPPROVE!\n` +
+                        `✅ [${this.sessionId}] TRANSAKSI DI-APPROVE!\n` +
                         `📊 Total Transaksi: ${txCount}\n\n` +
                         `💳 ${this.wallet.address}\n` +
                         `Method: ${method}\n` +
@@ -1847,9 +1870,11 @@ class CryptoAutoTx {
             const gweiValue = ethers.parseUnits(gasConfig.value.toString(), 'gwei');
             console.log(`[Session ${this.sessionId}] 🛠 FORCE GAS: ${gasConfig.value} Gwei`);
             
-            safeTxParams.gasPrice = gweiValue; 
-            safeTxParams.maxFeePerGas = gweiValue;
-            safeTxParams.maxPriorityFeePerGas = gweiValue;
+            // FIX: Don't mix legacy gasPrice with EIP-1559 params (maxFeePerGas/maxPriorityFeePerGas)
+            // Remove any existing EIP-1559 params and use legacy gasPrice only
+            delete safeTxParams.maxFeePerGas;
+            delete safeTxParams.maxPriorityFeePerGas;
+            safeTxParams.gasPrice = gweiValue;
 
         } else if (gasConfig.mode === 'aggressive' && gasConfig.value > 0) {
             try {
@@ -1858,10 +1883,22 @@ class CryptoAutoTx {
                 
                 if (feeData.maxFeePerGas) {
                     safeTxParams.maxFeePerGas = (feeData.maxFeePerGas * boostFactor) / 100n;
-                    safeTxParams.maxPriorityFeePerGas = (feeData.maxPriorityFeePerGas * boostFactor) / 100n;
+                    // FIX: Guard against null maxPriorityFeePerGas before multiplying
+                    safeTxParams.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas
+                        ? (feeData.maxPriorityFeePerGas * boostFactor) / 100n
+                        : safeTxParams.maxFeePerGas;
+                    // FIX: Ensure maxPriorityFeePerGas doesn't exceed maxFeePerGas
+                    if (safeTxParams.maxPriorityFeePerGas > safeTxParams.maxFeePerGas) {
+                        safeTxParams.maxPriorityFeePerGas = safeTxParams.maxFeePerGas;
+                    }
+                    // FIX: Remove legacy gasPrice if using EIP-1559 params
+                    delete safeTxParams.gasPrice;
                     console.log(`[Session ${this.sessionId}] 🚀 AGGRESSIVE GAS (+${gasConfig.value}%)`);
                 } else if (feeData.gasPrice) {
                     safeTxParams.gasPrice = (feeData.gasPrice * boostFactor) / 100n;
+                    // FIX: Remove EIP-1559 params if using legacy gasPrice
+                    delete safeTxParams.maxFeePerGas;
+                    delete safeTxParams.maxPriorityFeePerGas;
                     console.log(`[Session ${this.sessionId}] 🚀 AGGRESSIVE GAS PRICE (+${gasConfig.value}%)`);
                 }
             } catch (e) {
@@ -1873,12 +1910,25 @@ class CryptoAutoTx {
         if (!safeTxParams.gasPrice && !safeTxParams.maxFeePerGas) {
             try {
                 const feeData = await this.provider.getFeeData();
-                safeTxParams.maxFeePerGas = feeData.maxFeePerGas?.toString();
-                safeTxParams.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas?.toString();
-                console.log(`[Session ${this.sessionId}] Using Auto maxFeePerGas`);
+                if (feeData.maxFeePerGas) {
+                    safeTxParams.maxFeePerGas = feeData.maxFeePerGas?.toString();
+                    // FIX: Guard against null maxPriorityFeePerGas
+                    safeTxParams.maxPriorityFeePerGas = feeData.maxPriorityFeePerGas?.toString() 
+                        ?? safeTxParams.maxFeePerGas;
+                    // FIX: Don't mix EIP-1559 with legacy
+                    delete safeTxParams.gasPrice;
+                    console.log(`[Session ${this.sessionId}] Using Auto maxFeePerGas`);
+                } else if (feeData.gasPrice) {
+                    safeTxParams.gasPrice = feeData.gasPrice?.toString();
+                    delete safeTxParams.maxFeePerGas;
+                    delete safeTxParams.maxPriorityFeePerGas;
+                    console.log(`[Session ${this.sessionId}] Using Auto gasPrice (legacy)`);
+                }
             } catch (error) {
                 console.log(`[Session ${this.sessionId}] Failed to get fee data, using defaults`);
                 safeTxParams.gasPrice = '1000000000'; 
+                delete safeTxParams.maxFeePerGas;
+                delete safeTxParams.maxPriorityFeePerGas;
             }
         }
 
@@ -1888,8 +1938,10 @@ class CryptoAutoTx {
             if (estimateParams.gasLimit) delete estimateParams.gasLimit;
             const estimatedGas = await this.provider.estimateGas(estimateParams);
             if (estimatedGas) {
-                safeTxParams.gasLimit = (estimatedGas * 120n / 100n).toString(); 
-                console.log(`[Session ${this.sessionId}] Estimated gas: ${estimatedGas}, using: ${safeTxParams.gasLimit}`);
+                // FIX: Ensure estimatedGas is BigInt before arithmetic, then convert to string
+                const estimatedBig = BigInt(estimatedGas.toString());
+                safeTxParams.gasLimit = (estimatedBig * 120n / 100n).toString(); 
+                console.log(`[Session ${this.sessionId}] Estimated gas: ${estimatedBig}, using: ${safeTxParams.gasLimit}`);
             } else {
                 throw new Error('Gas estimation returned undefined');
             }
@@ -2276,15 +2328,16 @@ class CryptoAutoTx {
                     break;
                 case '2':
                     await this.checkBalance();
-                    this.run();
+                    // FIX: Added await to prevent unhandled promise rejection and double readline usage
+                    await this.run();
                     break;
                 case '3':
                     await this.walletManagementMode();
-                    this.run();
+                    await this.run();
                     break;
                 case '4':
                     await this.rpcManagementMode();
-                    this.run();
+                    await this.run();
                     break;
                 case '5':
                     console.log('👋 Keluar...');
@@ -2293,7 +2346,7 @@ class CryptoAutoTx {
                     break;
                 default:
                     console.log('❌ Pilihan tidak valid!');
-                    this.run();
+                    await this.run();
                     break;
             }
         } catch (error) {
@@ -2401,11 +2454,10 @@ class TelegramFullController {
             if (userState.action === 'awaiting_admin_password') {
                 isValid = (password === this.securitySystem.adminPassword); 
                 accessLevel = 'admin';
-                userState.attempts = (userState.attempts || 0) + 1;
+                // FIX: Only increment attempts on failure, check after validation
             } else if (userState.action === 'awaiting_script_password') {
                 isValid = (password === this.securitySystem.scriptPassword); 
                 accessLevel = 'script';
-                userState.attempts = (userState.attempts || 0) + 1;
             }
 
             if (isValid) {
@@ -2423,7 +2475,9 @@ class TelegramFullController {
                 this.requestNotificationChatId(chatId);
 
             } else {
-                const remainingAttempts = 3 - (userState.attempts || 0);
+                // FIX: Increment attempts only on failure, compute remaining correctly
+                userState.attempts = (userState.attempts || 0) + 1;
+                const remainingAttempts = 3 - userState.attempts;
                 if (remainingAttempts > 0) {
                     this.bot.sendMessage(chatId,
                         `❌ Wrong password. ${remainingAttempts} attempts left\n\n` +
@@ -2444,22 +2498,12 @@ class TelegramFullController {
         try {
             const cryptoAppInstance = new CryptoAutoTx(null, this.config, chatId); 
             cryptoAppInstance.bot = this.bot;
-            await cryptoAppInstance.initializeWalletConnect();
+            // FIX: Set sessionNotificationChatId to the user's own chatId by default
+            cryptoAppInstance.sessionNotificationChatId = chatId.toString();
             
-            if (cryptoAppInstance.signClient) {
-                cryptoAppInstance.signClient.on('session_proposal', (proposal) => {
-                    this.bot.sendMessage(chatId, `🔔 NOTIFIKASI: Proposal sesi diterima.`);
-                });
-                
-                cryptoAppInstance.signClient.on('session_request', (request) => {
-                    const method = request.params.request?.method || 'unknown';
-                    this.bot.sendMessage(chatId, `🔔 NOTIFIKASI: Transaksi diterima (Method: ${method})`);
-                });
-
-                cryptoAppInstance.signClient.on('session_delete', () => {
-                    this.bot.sendMessage(chatId, `🔌 INFO: WalletConnect session disconnected.`);
-                });
-            }
+            await cryptoAppInstance.initializeWalletConnect();
+            // NOTE: WalletConnect event handlers are already set up inside initializeWalletConnect()
+            // via setupWalletConnectEvents(). No need to add duplicate handlers here.
 
             console.log(`✅ Crypto Auto-Tx Bot session initialized for user ${chatId}`);
             return cryptoAppInstance;
@@ -2502,7 +2546,9 @@ class TelegramFullController {
                 notificationChatId = chatId.toString();
             }
             
-            if (notificationChatId && !isNaN(notificationChatId)) {
+            // FIX: More robust chat ID validation - must be a valid integer (positive or negative for groups)
+            const parsedChatId = parseInt(notificationChatId, 10);
+            if (notificationChatId && !isNaN(parsedChatId) && parsedChatId.toString() === notificationChatId) {
                 cryptoApp.sessionNotificationChatId = notificationChatId; 
                 
                 console.log(`[Session ${chatId}] Set private notification ID to: ${notificationChatId}`);
@@ -2520,7 +2566,7 @@ class TelegramFullController {
                 }
 
             } else {
-                this.bot.sendMessage(chatId, `❌ Invalid Chat ID. Harus angka (atau "disini"). Coba lagi atau ketik 'skip':`);
+                this.bot.sendMessage(chatId, `❌ Invalid Chat ID. Harus angka bulat (atau "disini"). Coba lagi atau ketik 'skip':`);
                 return;
             }
             
